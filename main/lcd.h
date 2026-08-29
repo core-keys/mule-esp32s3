@@ -32,3 +32,8 @@ lcd_diag_t lcd_diag(void);
 // Screens (draw from a single task to avoid races — see main.c).
 void ui_boot_splash(void);
 void ui_note_ctap(const char *cmd);      // update the status screen after activity
+
+// The per-operation approval prompt — the WYSIWYS moment. `who` is e.g.
+// "felipe@prod-db"; `forwarded` raises the FORWARDED banner.
+void ui_approval(const char *who, bool forwarded);
+void ui_result(const char *msg);         // brief post-decision screen

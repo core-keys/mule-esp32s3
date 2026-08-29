@@ -196,3 +196,24 @@ void ui_note_ctap(const char *cmd)
     lcd_text(8, 288, "awaiting host", 1, COL_MUTED, COL_BG);
     lcd_flush();
 }
+
+void ui_approval(const char *who, bool forwarded)
+{
+    lcd_fill(COL_BG);
+    lcd_text(centered_x("APPROVE", 2), 28, "APPROVE", 2, COL_COPPER, COL_BG);
+    lcd_text(8, 84, "SSH sign", 1, COL_MUTED, COL_BG);
+    lcd_text(8, 112, who ? who : "?", 1, COL_TEAL, COL_BG);
+    if (forwarded)
+        lcd_text(8, 148, "!! FORWARDED", 1, COL_COPPER, COL_BG);
+    lcd_text(8, 280, "press BOOT to sign", 1, COL_FG, COL_BG);
+    lcd_text(8, 300, "ignore to deny", 1, COL_MUTED, COL_BG);
+    lcd_flush();
+}
+
+void ui_result(const char *msg)
+{
+    lcd_fill(COL_BG);
+    lcd_text(centered_x("core-keys", 2), 40, "core-keys", 2, COL_COPPER, COL_BG);
+    lcd_text(centered_x(msg, 1), 120, msg, 1, COL_FG, COL_BG);
+    lcd_flush();
+}
