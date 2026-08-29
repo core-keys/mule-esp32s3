@@ -15,6 +15,8 @@
 #include "tinyusb.h"
 #include "corekeys.h"
 #include "lcd.h"
+#include "ckvp.h"
+#include "session.h"
 #include "noise/protocol.h"
 
 // Set by the boot-time Noise self-test: 0 = the KK responder pattern
@@ -114,10 +116,19 @@ void vendor_rx_packet(const uint8_t *pkt64)
         memcpy(&r[10], &d.free_heap,     4);
         memcpy(&r[14], &d.free_internal, 4);
         r[18] = (uint8_t)(g_noise_status & 0xFF);   // 0 = noise-c KK ok on-device
+        r[19] = (uint8_t)session_state();           // 0 idle / 1 handshaking / 2 up
         ck_report_send(ITF_VENDOR, r);
         return;
     }
-    ck_report_send(ITF_VENDOR, pkt64);   // loopback
+    // Everything else is CKVP-framed protocol traffic -> reassemble and dispatch
+    // to the Noise session. (No plaintext side effects: the only raw handlers are
+    // STATUS above and the reboot magic in ck_usb_rx_enqueue.)
+    static ckvp_reasm_t s_vendor_reasm;
+    uint8_t mt;
+    uint16_t len;
+    if (ckvp_push(&s_vendor_reasm, pkt64, &mt, &len) == 1) {
+        session_on_message(mt, s_vendor_reasm.buf, len, s_vendor_reasm.chan);
+    }
 }
 
 // ---- Worker task -------------------------------------------------------------
