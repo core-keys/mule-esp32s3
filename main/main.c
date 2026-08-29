@@ -117,6 +117,7 @@ void vendor_rx_packet(const uint8_t *pkt64)
         memcpy(&r[14], &d.free_internal, 4);
         r[18] = (uint8_t)(g_noise_status & 0xFF);   // 0 = noise-c KK ok on-device
         r[19] = (uint8_t)session_state();           // 0 idle / 1 handshaking / 2 up
+        r[20] = session_button_levels();            // bit0=GPIO0 bit1=GPIO14 (1=high/unpressed)
         ck_report_send(ITF_VENDOR, r);
         return;
     }
@@ -175,8 +176,8 @@ void app_main(void)
     ESP_LOGI(TAG, "boot: lcd_init()=%d", lcd_ok);
     if (lcd_ok) ui_boot_splash();
 
-    // Brief dwell so the splash is visible and the pre-USB log window stays open.
-    vTaskDelay(pdMS_TO_TICKS(3000));
+    // Brief dwell so the splash is visible before USB enumerates.
+    vTaskDelay(pdMS_TO_TICKS(1500));
 
     ESP_ERROR_CHECK(tinyusb_driver_install(&tusb_cfg));
     ESP_LOGI(TAG, "USB composite device installed (CTAP + vendor HID)");

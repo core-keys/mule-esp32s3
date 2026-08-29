@@ -9,3 +9,6 @@ void session_on_message(uint8_t msg_type, const uint8_t *data, uint16_t len, uin
 
 // Session state for the display: 0 = idle, 1 = handshaking, 2 = transport up.
 int session_state(void);
+
+// Live button levels for STATUS diagnostics: bit0 = GPIO0, bit1 = GPIO14 (1=high).
+uint8_t session_button_levels(void);

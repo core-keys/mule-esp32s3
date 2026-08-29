@@ -33,6 +33,7 @@ static const uint8_t CK_SSH_SEED[32] = {
 };
 
 #define BUTTON_GPIO      GPIO_NUM_0    // BOOT button
+#define BUTTON_GPIO2     GPIO_NUM_14   // T-Display-S3 second button
 #define BUTTON_WINDOW_MS 20000
 #define REQ_ID_LEN       8
 
@@ -167,22 +168,33 @@ static int ssh_extract(const uint8_t *tbs, uint16_t len, const uint8_t **user, u
 static void button_init(void)
 {
     if (s_button_ready) return;
-    gpio_config_t io = { .pin_bit_mask = 1ULL << BUTTON_GPIO, .mode = GPIO_MODE_INPUT,
-                         .pull_up_en = GPIO_PULLUP_ENABLE };
+    gpio_config_t io = { .pin_bit_mask = (1ULL << BUTTON_GPIO) | (1ULL << BUTTON_GPIO2),
+                         .mode = GPIO_MODE_INPUT, .pull_up_en = GPIO_PULLUP_ENABLE };
     gpio_config(&io);
     s_button_ready = true;
+}
+static bool button_pressed(void)
+{
+    return gpio_get_level(BUTTON_GPIO) == 0 || gpio_get_level(BUTTON_GPIO2) == 0;
 }
 static bool button_wait(uint32_t timeout_ms)
 {
     button_init();
     for (uint32_t t = 0; t < timeout_ms; t += 20) {
-        if (gpio_get_level(BUTTON_GPIO) == 0) {          // pressed (active low)
+        if (button_pressed()) {                          // pressed (active low)
             vTaskDelay(pdMS_TO_TICKS(30));               // debounce
-            if (gpio_get_level(BUTTON_GPIO) == 0) return true;
+            if (button_pressed()) return true;
         }
         vTaskDelay(pdMS_TO_TICKS(20));
     }
     return false;
+}
+
+// Live GPIO levels for STATUS diagnostics: bit0 = GPIO0, bit1 = GPIO14 (1=high).
+uint8_t session_button_levels(void)
+{
+    button_init();
+    return (gpio_get_level(BUTTON_GPIO) ? 1 : 0) | (gpio_get_level(BUTTON_GPIO2) ? 2 : 0);
 }
 
 // ---- Noise plumbing ----------------------------------------------------------
