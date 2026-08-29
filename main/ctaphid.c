@@ -10,6 +10,8 @@
 #include <string.h>
 #include "esp_log.h"
 #include "corekeys.h"
+#include "ctaphid.h"
+#include "ctap2.h"
 #include "lcd.h"
 
 static const char *TAG = "ctaphid";
@@ -25,9 +27,8 @@ static const char *TAG = "ctaphid";
 #define CTAPHID_LOCK    0x04
 #define CTAPHID_INIT    0x06
 #define CTAPHID_WINK    0x08
-#define CTAPHID_CBOR    0x10
+// CTAPHID_CBOR / CTAPHID_KEEPALIVE come from ctaphid.h (shared with ctap2.c).
 #define CTAPHID_CANCEL  0x11
-#define CTAPHID_KEEPALIVE 0x3B
 #define CTAPHID_ERROR   0x3F
 
 // CTAPHID error codes.
@@ -45,6 +46,8 @@ static const char *TAG = "ctaphid";
 // CTAP2 status / command bytes.
 #define CTAP2_OK                   0x00
 #define CTAP1_ERR_INVALID_CMD      0x01
+#define CTAP2_CMD_MAKE_CREDENTIAL  0x01
+#define CTAP2_CMD_GET_ASSERTION    0x02
 #define CTAP2_CMD_GET_INFO         0x04
 
 // ---- Reassembly state (single active transaction) ----------------------------
@@ -74,7 +77,7 @@ static inline void put_be32(uint8_t *p, uint32_t v)
 // ---- Response fragmenter -----------------------------------------------------
 // Frame `data` as a CTAPHID message (init packet + continuation packets), each a
 // zero-padded 64-byte report, and send them in order on the CTAP interface.
-static void ctaphid_send(uint32_t cid, uint8_t cmd, const uint8_t *data, uint16_t len)
+void ctaphid_send(uint32_t cid, uint8_t cmd, const uint8_t *data, uint16_t len)
 {
     uint8_t pkt[CK_REPORT_SIZE];
     uint16_t off = 0;
@@ -108,23 +111,37 @@ static void ctaphid_error(uint32_t cid, uint8_t code)
     ctaphid_send(cid, CTAPHID_ERROR, &code, 1);
 }
 
+void ctaphid_keepalive(uint32_t cid, uint8_t status)
+{
+    ctaphid_send(cid, CTAPHID_KEEPALIVE, &status, 1);
+}
+
 // ---- CTAP2: authenticatorGetInfo --------------------------------------------
-// A minimal, honest response: which CTAP versions the (eventual) device speaks,
-// its AAGUID, and the option flags true today. Byte-built CBOR keeps the mule
-// dependency-free; the real firmware will use a checked CBOR encoder.
+// Pinless / touch-only posture: options {rk:false, up:true} with NEITHER "uv"
+// NOR "clientPin" present, so hosts never prompt to set a PIN. AAGUID is 16 zero
+// bytes (self/none convention) and BYTE-IDENTICAL to every makeCredential
+// attestedCredentialData. Advertises ES256 (-7) and the usb transport.
 static const uint8_t GET_INFO_RESPONSE[] = {
     CTAP2_OK,
-    0xA3,                                     // map(3)
-      0x01,                                   //  key 1: versions
-        0x82,                                 //   array(2)
+    0xA5,                                     // map(5)
+      0x01,                                   //  1: versions
+        0x82,
           0x68, 'F','I','D','O','_','2','_','1',
           0x68, 'F','I','D','O','_','2','_','0',
-      0x03,                                   //  key 3: aaguid (16 bytes)
-        0x50, 'c','o','r','e','-','k','e','y','s','-','m','u','l','e', 0x00, 0x01,
-      0x04,                                   //  key 4: options
-        0xA2,                                 //   map(2)
-          0x62, 'u','p', 0xF5,                //    "up": true  (user-presence)
-          0x64, 'p','l','a','t', 0xF4,        //    "plat": false (not a platform authenticator)
+      0x03,                                   //  3: aaguid = 16 zero bytes
+        0x50, 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,
+      0x04,                                   //  4: options
+        0xA2,
+          0x62, 'r','k', 0xF4,                //    "rk": false (non-discoverable)
+          0x62, 'u','p', 0xF5,                //    "up": true  (user presence)
+      0x09,                                   //  9: transports
+        0x81, 0x63, 'u','s','b',
+      0x0A,                                   //  10: algorithms
+        0x81,
+          0xA2,
+            0x63, 'a','l','g', 0x26,          //    "alg": -7 (ES256)
+            0x64, 't','y','p','e',
+              0x6A, 'p','u','b','l','i','c','-','k','e','y',
 };
 
 static void ctap2_dispatch(uint32_t cid, const uint8_t *data, uint16_t len)
@@ -136,6 +153,14 @@ static void ctap2_dispatch(uint32_t cid, const uint8_t *data, uint16_t len)
         ESP_LOGI(TAG, "CBOR authenticatorGetInfo");
         ui_note_ctap("getInfo");
         ctaphid_send(cid, CTAPHID_CBOR, GET_INFO_RESPONSE, sizeof(GET_INFO_RESPONSE));
+        break;
+    case CTAP2_CMD_MAKE_CREDENTIAL:
+        ESP_LOGI(TAG, "CBOR authenticatorMakeCredential");
+        ctap2_make_credential(cid, data + 1, len - 1);
+        break;
+    case CTAP2_CMD_GET_ASSERTION:
+        ESP_LOGI(TAG, "CBOR authenticatorGetAssertion");
+        ctap2_get_assertion(cid, data + 1, len - 1);
         break;
     default: {
         // Honest "not yet implemented" rather than a fabricated success.

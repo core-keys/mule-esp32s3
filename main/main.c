@@ -84,14 +84,20 @@ void ck_usb_rx_enqueue(uint8_t itf, const uint8_t *pkt64)
 // ---- Blocking report send (worker task only) --------------------------------
 void ck_report_send(uint8_t itf, const uint8_t *report64)
 {
-    // Wait for the endpoint to accept a new report, yielding to let the USB
-    // task run. Bounded so a stalled host cannot wedge the worker forever.
-    for (int i = 0; i < 200; i++) {
-        if (tud_mounted() && tud_hid_n_ready(itf)) break;
+    // Push the report, retrying until TinyUSB actually accepts it into the IN
+    // endpoint (tud_hid_n_report returns false while the previous report is
+    // still in flight). The old code fell through to an UNCONDITIONAL send after
+    // a fixed spin, which silently dropped a still-busy continuation frame — a
+    // multi-frame CTAPHID response (makeCredential/getAssertion, or an 80-byte
+    // getInfo) would then arrive incomplete and the host would reject it. Yield
+    // each attempt so the USB task can complete the prior transfer; bounded so a
+    // stalled host cannot wedge the worker forever (~1 s at 1000 Hz tick).
+    for (int i = 0; i < 1000; i++) {
+        if (!tud_mounted()) return;
+        if (tud_hid_n_ready(itf) && tud_hid_n_report(itf, 0, report64, CK_REPORT_SIZE)) {
+            return;
+        }
         vTaskDelay(pdMS_TO_TICKS(1));
-    }
-    if (tud_mounted()) {
-        tud_hid_n_report(itf, 0, report64, CK_REPORT_SIZE);
     }
 }
 
@@ -182,6 +188,7 @@ void app_main(void)
     ESP_ERROR_CHECK(tinyusb_driver_install(&tusb_cfg));
     ESP_LOGI(TAG, "USB composite device installed (CTAP + vendor HID)");
 
-    xTaskCreate(worker_task, "ck_worker", 6144, NULL, 5, NULL);
+    // 24 KB stack: the CTAP2 path runs mbedTLS P-256 keygen/ECDSA on this task.
+    xTaskCreate(worker_task, "ck_worker", 24576, NULL, 5, NULL);
     ESP_LOGI(TAG, "worker task running; awaiting host");
 }

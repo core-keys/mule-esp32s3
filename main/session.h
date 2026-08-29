@@ -12,3 +12,8 @@ int session_state(void);
 
 // Live button levels for STATUS diagnostics: bit0 = GPIO0, bit1 = GPIO14 (1=high).
 uint8_t session_button_levels(void);
+
+// Button primitives (active-low, either GPIO0 or GPIO14) for the CTAP2 gate.
+#include <stdbool.h>
+void ck_button_init(void);
+bool ck_button_pressed(void);

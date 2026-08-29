@@ -85,7 +85,7 @@ const uint8_t desc_configuration[] = {
     // ITF 0 — CTAPHID:  itf, string, protocol, report len, EP out, EP in, EP size, poll ms
     TUD_HID_INOUT_DESCRIPTOR(ITF_CTAP, 4, HID_ITF_PROTOCOL_NONE,
                              sizeof(desc_hid_report_ctap),
-                             EPNUM_CTAP_OUT, EPNUM_CTAP_IN, CK_REPORT_SIZE, 5),
+                             EPNUM_CTAP_OUT, EPNUM_CTAP_IN, CK_REPORT_SIZE, 1),
 
     // ITF 1 — vendor daemon channel
     TUD_HID_INOUT_DESCRIPTOR(ITF_VENDOR, 5, HID_ITF_PROTOCOL_NONE,

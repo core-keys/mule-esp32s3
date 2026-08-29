@@ -197,6 +197,10 @@ uint8_t session_button_levels(void)
     return (gpio_get_level(BUTTON_GPIO) ? 1 : 0) | (gpio_get_level(BUTTON_GPIO2) ? 2 : 0);
 }
 
+// Public button primitives shared with the CTAP2 keepalive-covered gate (ctap2.c).
+void ck_button_init(void)    { button_init(); }
+bool ck_button_pressed(void) { return button_pressed(); }
+
 // ---- Noise plumbing ----------------------------------------------------------
 static void reset_session(void)
 {
