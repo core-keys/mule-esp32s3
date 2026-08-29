@@ -174,6 +174,7 @@ void ui_boot_splash(void)
 
 static char s_last_cmd[20] = "idle";
 static uint32_t s_req_count;
+extern int g_noise_status;   // set by the boot Noise self-test (main.c)
 
 void ui_note_ctap(const char *cmd)
 {
@@ -186,6 +187,12 @@ void ui_note_ctap(const char *cmd)
     lcd_text(8, 88, line, 1, COL_FG, COL_BG);
     snprintf(line, sizeof(line), "reqs   %lu", (unsigned long)s_req_count);
     lcd_text(8, 112, line, 1, COL_FG, COL_BG);
+    if (g_noise_status == 0)
+        lcd_text(8, 144, "noise  KK ok", 1, COL_TEAL, COL_BG);
+    else {
+        snprintf(line, sizeof(line), "noise  err %d", g_noise_status);
+        lcd_text(8, 144, line, 1, COL_COPPER, COL_BG);
+    }
     lcd_text(8, 288, "awaiting host", 1, COL_MUTED, COL_BG);
     lcd_flush();
 }

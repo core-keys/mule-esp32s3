@@ -15,6 +15,22 @@
 #include "tinyusb.h"
 #include "corekeys.h"
 #include "lcd.h"
+#include "noise/protocol.h"
+
+// Set by the boot-time Noise self-test: 0 = the KK responder pattern
+// instantiated OK on-device; nonzero = a noise-c error code. Shown on the LCD
+// and in the vendor STATUS reply — proves the noise-c port runs on xtensa.
+int g_noise_status = -1;
+
+static int noise_selftest(void)
+{
+    noise_init();
+    NoiseHandshakeState *hs = 0;
+    int err = noise_handshakestate_new_by_name(
+        &hs, "Noise_KK_25519_ChaChaPoly_SHA256", NOISE_ROLE_RESPONDER);
+    if (hs) noise_handshakestate_free(hs);
+    return err; // NOISE_ERROR_NONE (0) on success
+}
 
 static const char *TAG = "corekeys-mule";
 
@@ -97,6 +113,7 @@ void vendor_rx_packet(const uint8_t *pkt64)
         memcpy(&r[6],  &d.fb_bytes,      4);
         memcpy(&r[10], &d.free_heap,     4);
         memcpy(&r[14], &d.free_internal, 4);
+        r[18] = (uint8_t)(g_noise_status & 0xFF);   // 0 = noise-c KK ok on-device
         ck_report_send(ITF_VENDOR, r);
         return;
     }
@@ -141,6 +158,8 @@ void app_main(void)
     // the console still owns USB-Serial-JTAG, so lcd_init()'s result (and any
     // fault) is observable over the serial console for debugging.
     ESP_LOGI(TAG, "boot: free heap=%u", (unsigned)esp_get_free_heap_size());
+    g_noise_status = noise_selftest();
+    ESP_LOGI(TAG, "boot: noise selftest = %d (0=ok)", g_noise_status);
     bool lcd_ok = lcd_init();
     ESP_LOGI(TAG, "boot: lcd_init()=%d", lcd_ok);
     if (lcd_ok) ui_boot_splash();
