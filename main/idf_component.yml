@@ -1,0 +1,4 @@
+## Managed component dependencies for the core-keys M1 mule.
+dependencies:
+  idf: ">=5.5"
+  espressif/esp_tinyusb: "^1.7.0"
