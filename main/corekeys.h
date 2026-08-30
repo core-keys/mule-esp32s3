@@ -23,3 +23,16 @@ void ck_usb_rx_enqueue(uint8_t itf, const uint8_t *pkt64);
 // Worker-task entry points (run outside USB-callback context, so they may send).
 void ctaphid_rx_packet(const uint8_t *pkt64);   // ITF_CTAP state machine
 void vendor_rx_packet(const uint8_t *pkt64);    // ITF_VENDOR — M1 loopback
+
+// One queued report from the USB callback to the worker: (interface, 64 bytes).
+typedef struct {
+    uint8_t itf;
+    uint8_t data[CK_REPORT_SIZE];
+} ck_rx_item_t;
+
+// Dequeue one received report, waiting up to `timeout_ms` (returns false on
+// timeout). The getAssertion co-auth wait uses this to pump the rx queue INLINE
+// — the single worker task is blocked in the CTAP handler, so it must drain its
+// own vendor replies (the COAUTH_RESP) itself or it would deadlock. Worker-task
+// only.
+bool ck_rx_poll(ck_rx_item_t *item, uint32_t timeout_ms);

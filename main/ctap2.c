@@ -8,11 +8,13 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
+#include "esp_random.h"
+#include "corekeys.h"    // ck_rx_poll / vendor_rx_packet / ITF_*
 #include "ctap2.h"
 #include "ctaphid.h"
 #include "ck_p256.h"
 #include "ck_credid.h"
-#include "session.h"     // ck_button_init / ck_button_pressed
+#include "session.h"     // ck_button_init / ck_button_pressed / co-auth
 #include "lcd.h"
 
 static const char *TAG = "ctap2";
@@ -27,10 +29,15 @@ static const char *TAG = "ctap2";
 #define CTAP2_ERR_OPERATION_DENIED      0x27
 #define CTAP2_ERR_UNSUPPORTED_OPTION    0x2B
 #define CTAP2_ERR_INVALID_OPTION        0x2C
+#define CTAP2_ERR_KEEPALIVE_CANCEL      0x2D
 #define CTAP2_ERR_NO_CREDENTIALS        0x2E
+#define CTAP2_ERR_USER_ACTION_TIMEOUT   0x2F
 
 #define FIDO_BUTTON_WINDOW_MS 20000
 #define KEEPALIVE_INTERVAL_MS 80
+// Desktop co-auth fail-closed deadline. Kept small so the whole ceremony (this
+// + the button window) stays under a browser's ~30 s WebAuthn timeout.
+#define COAUTH_DEADLINE_MS 2500
 
 // ================= CBOR reader (definite-length, order-independent) ===========
 typedef struct { const uint8_t *b; uint16_t len; uint16_t p; } cbr_t;
@@ -152,6 +159,72 @@ static void rp_label(char *dst, size_t cap, const uint8_t *rp_id, uint16_t rp_le
     size_t n = rp_len < cap - 1 ? rp_len : cap - 1;
     memcpy(dst, rp_id, n);
     dst[n] = 0;
+}
+
+// ---- Inline rx pump for the co-auth wait ------------------------------------
+// The getAssertion handler runs on the single worker task, but the COAUTH_RESP
+// it is waiting for also arrives on that task's queue — so it MUST drain the
+// queue itself (a blocking receive would deadlock and force a reflash).
+enum { CA_APPROVE = 0, CA_DENY, CA_TIMEOUT, CA_CANCEL };
+
+// Is `pkt` a CTAPHID_CANCEL (cmd 0x11) init frame on our channel?
+static bool is_ctaphid_cancel(const uint8_t *pkt, uint32_t cid)
+{
+    uint32_t pcid = ((uint32_t)pkt[0] << 24) | ((uint32_t)pkt[1] << 16) |
+                    ((uint32_t)pkt[2] << 8) | pkt[3];
+    return pcid == cid && (pkt[4] & 0x80) && (pkt[4] & 0x7F) == 0x11;
+}
+
+// Wait for the desktop verdict, pumping vendor packets into the session (which
+// latches the COAUTH_RESP), streaming PROCESSING keepalives, and honoring CANCEL.
+static int coauth_wait(uint32_t cid, uint32_t timeout_ms)
+{
+    uint32_t elapsed = 0, since_ka = KEEPALIVE_INTERVAL_MS;
+    while (elapsed < timeout_ms) {
+        ck_rx_item_t item;
+        if (ck_rx_poll(&item, 20)) {
+            if (item.itf == ITF_VENDOR) {
+                vendor_rx_packet(item.data);
+                int v = session_coauth_poll();
+                if (v == CK_COAUTH_APPROVE) return CA_APPROVE;
+                if (v == CK_COAUTH_DENY) return CA_DENY;
+            } else if (item.itf == ITF_CTAP && is_ctaphid_cancel(item.data, cid)) {
+                return CA_CANCEL;
+            }
+        }
+        elapsed += 20; since_ka += 20;
+        if (since_ka >= KEEPALIVE_INTERVAL_MS) {
+            ctaphid_keepalive(cid, CTAPHID_STATUS_PROCESSING);
+            since_ka = 0;
+        }
+    }
+    return CA_TIMEOUT;
+}
+
+// The button gate used after approval: keeps pumping (so a CANCEL still lands
+// and the session stays serviced) and streams UP_NEEDED keepalives.
+// Returns 1 = pressed, 0 = timeout, -1 = cancelled.
+static int button_gate_pumped(uint32_t cid, uint32_t timeout_ms)
+{
+    ck_button_init();
+    uint32_t elapsed = 0, since_ka = KEEPALIVE_INTERVAL_MS;
+    while (elapsed < timeout_ms) {
+        if (ck_button_pressed()) {
+            vTaskDelay(pdMS_TO_TICKS(30));
+            if (ck_button_pressed()) return 1;
+        }
+        ck_rx_item_t item;
+        if (ck_rx_poll(&item, 20)) {
+            if (item.itf == ITF_VENDOR) vendor_rx_packet(item.data);
+            else if (item.itf == ITF_CTAP && is_ctaphid_cancel(item.data, cid)) return -1;
+        }
+        elapsed += 20; since_ka += 20;
+        if (since_ka >= KEEPALIVE_INTERVAL_MS) {
+            ctaphid_keepalive(cid, CTAPHID_STATUS_UPNEEDED);
+            since_ka = 0;
+        }
+    }
+    return 0;
 }
 
 // ================= authenticatorMakeCredential (0x01) =========================
@@ -428,14 +501,34 @@ void ctap2_get_assertion(uint32_t cid, const uint8_t *req, uint16_t len)
     authdata[32] = 0x01;
     authdata[33] = authdata[34] = authdata[35] = authdata[36] = 0;
 
-    char who[40];
-    rp_label(who, sizeof(who), rp_id, rp_len);
-    ui_approval(who, false);
-    if (!button_gate(cid, FIDO_BUTTON_WINDOW_MS)) {
-        ui_result("denied");
+    // Split-key gate: the desktop must co-authorize BEFORE any button (docs §7).
+    // No live session = no paired desktop present -> deny, never a button.
+    uint8_t req_id[8];
+    esp_fill_random(req_id, sizeof(req_id));
+    ctaphid_keepalive(cid, CTAPHID_STATUS_PROCESSING);
+    if (session_coauth_begin(CK_OP_FIDO2_ASSERT, req_id, (const char *)rp_id, rp_len,
+                             client_hash, authdata, sizeof(authdata),
+                             sel_cred, sel_len) != 0) {
+        ui_result("no desktop");
         ctap_status(cid, CTAP2_ERR_OPERATION_DENIED);
         return;
     }
+    int ca = coauth_wait(cid, COAUTH_DEADLINE_MS);
+    session_coauth_end();
+    if (ca == CA_CANCEL) { ctap_status(cid, CTAP2_ERR_KEEPALIVE_CANCEL); return; }
+    if (ca != CA_APPROVE) {
+        ui_result("denied");                          // desktop deny or timeout
+        ctap_status(cid, CTAP2_ERR_OPERATION_DENIED);
+        return;
+    }
+
+    // Approved -> WYSIWYS button (still pumping so a CANCEL lands).
+    char who[40];
+    rp_label(who, sizeof(who), rp_id, rp_len);
+    ui_approval(who, false);
+    int bg = button_gate_pumped(cid, FIDO_BUTTON_WINDOW_MS);
+    if (bg == -1) { ui_result("cancelled"); ctap_status(cid, CTAP2_ERR_KEEPALIVE_CANCEL); return; }
+    if (bg == 0) { ui_result("timeout"); ctap_status(cid, CTAP2_ERR_USER_ACTION_TIMEOUT); return; }
 
     uint8_t tbs[37 + 32];
     memcpy(tbs, authdata, 37);

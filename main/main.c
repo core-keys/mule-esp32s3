@@ -55,12 +55,14 @@ static void ck_enter_download(void)
 }
 
 // ---- RX queue: (instance, 64-byte report) from USB callback to worker --------
-typedef struct {
-    uint8_t itf;
-    uint8_t data[CK_REPORT_SIZE];
-} ck_rx_item_t;
-
+// ck_rx_item_t is declared in corekeys.h (shared with the CTAP2 co-auth pump).
 static QueueHandle_t s_rx_queue;
+
+// Dequeue one report inline (worker task only) — see corekeys.h.
+bool ck_rx_poll(ck_rx_item_t *item, uint32_t timeout_ms)
+{
+    return xQueueReceive(s_rx_queue, item, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
+}
 
 void ck_usb_rx_enqueue(uint8_t itf, const uint8_t *pkt64)
 {

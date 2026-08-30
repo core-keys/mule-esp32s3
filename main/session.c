@@ -280,6 +280,65 @@ static uint16_t handle_signreq(const uint8_t *plain, uint16_t plen, uint8_t *res
     return signresp_ok(resp, r.req_id, r.req_id_len, sig, 64);
 }
 
+// ---- FIDO2 co-authorization (device-initiated) -------------------------------
+static uint8_t s_ca_req_id[REQ_ID_LEN];
+static volatile int s_ca_verdict;   // CK_COAUTH_PENDING / APPROVE / DENY
+static bool s_ca_active;
+
+int session_coauth_begin(uint8_t op, const uint8_t *req_id,
+                         const char *rp_id, uint16_t rp_len,
+                         const uint8_t *client_hash,
+                         const uint8_t *auth_data, uint16_t auth_len,
+                         const uint8_t *cred_id, uint16_t cred_len)
+{
+    if (s_state != ST_TRANSPORT || !s_send) return -1;   // fail-closed: no desktop
+    // Plaintext = tag 0x03 || CBOR array(6):
+    //   [bytes req_id, uint op, text rp_id, bytes clientHash(32),
+    //    bytes authData, bytes credId]. user_name/user_handle are absent, which
+    // minicbor encodes as a shorter array (verified against the daemon wire).
+    uint8_t buf[CKVP_MAX_MSG];
+    int p = 0;
+    buf[p++] = CK_RT_COAUTH_REQ;
+    buf[p++] = 0x86;                                    // array(6)
+    p += cbor_put_bytes(buf + p, req_id, REQ_ID_LEN);
+    buf[p++] = (uint8_t)(op & 0x1F);                   // uint op (< 24)
+    if (rp_len < 24) {
+        buf[p++] = 0x60 | (uint8_t)rp_len;             // text rp_id
+    } else {
+        buf[p++] = 0x78; buf[p++] = (uint8_t)rp_len;
+    }
+    memcpy(buf + p, rp_id, rp_len); p += rp_len;
+    p += cbor_put_bytes(buf + p, client_hash, 32);
+    p += cbor_put_bytes(buf + p, auth_data, auth_len);
+    p += cbor_put_bytes(buf + p, cred_id, cred_len);
+
+    memcpy(s_ca_req_id, req_id, REQ_ID_LEN);
+    s_ca_verdict = CK_COAUTH_PENDING;
+    s_ca_active = true;
+    send_encrypted(buf, (uint16_t)p);
+    return 0;
+}
+
+int session_coauth_poll(void) { return s_ca_verdict; }
+void session_coauth_end(void) { s_ca_active = false; }
+
+// Decode a COAUTH_RESP (array(2/3): [bytes req_id, bool approve, opt text]) and
+// latch the verdict if its req_id matches the outstanding request.
+static void coauth_on_resp(const uint8_t *cbor, uint16_t len)
+{
+    if (!s_ca_active || len < 1) return;
+    uint16_t p = 0;
+    uint8_t ah = cbor[p++];
+    if (ah != 0x82 && ah != 0x83) return;              // array(2) or array(3)
+    const uint8_t *rid; uint16_t rid_len;
+    if (cbor_str(cbor, len, &p, 2, &rid, &rid_len)) return;
+    if (rid_len != REQ_ID_LEN || memcmp(rid, s_ca_req_id, REQ_ID_LEN) != 0) return;
+    if (p >= len) return;
+    uint8_t bv = cbor[p];
+    if (bv == 0xF5)      s_ca_verdict = CK_COAUTH_APPROVE;
+    else if (bv == 0xF4) s_ca_verdict = CK_COAUTH_DENY;
+}
+
 static void do_transport(const uint8_t *data, uint16_t len)
 {
     if (s_state != ST_TRANSPORT || !s_recv || !s_send) return;
@@ -289,10 +348,21 @@ static void do_transport(const uint8_t *data, uint16_t len)
     NoiseBuffer b;
     noise_buffer_set_inout(b, buf, len, sizeof(buf));
     if (noise_cipherstate_decrypt(s_recv, &b) != NOISE_ERROR_NONE) return;  // droppable (§5)
+    if (b.size < 1) return;
 
-    uint8_t resp[128];
-    uint16_t rlen = handle_signreq(buf, b.size, resp);
-    if (rlen) send_encrypted(resp, rlen);
+    // First plaintext byte is the record-type tag (lockstep with the daemon).
+    uint8_t rt = buf[0];
+    const uint8_t *body = buf + 1;
+    uint16_t body_len = (uint16_t)(b.size - 1);
+    if (rt == CK_RT_SIGN_REQ) {
+        uint8_t out[128];
+        out[0] = CK_RT_SIGN_RESP;
+        uint16_t rlen = handle_signreq(body, body_len, out + 1);
+        if (rlen) send_encrypted(out, (uint16_t)(rlen + 1));
+    } else if (rt == CK_RT_COAUTH_RESP) {
+        coauth_on_resp(body, body_len);
+    }
+    // Unknown tags: drop (no plaintext side effects, §5).
 }
 
 void session_on_message(uint8_t msg_type, const uint8_t *data, uint16_t len, uint16_t chan)

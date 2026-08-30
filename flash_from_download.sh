@@ -1,41 +1,32 @@
 #!/usr/bin/env bash
-# Wait for the board to appear in ROM download mode, then flash it.
-# Use this when the software escape hatch can't run (vendor interface wedged):
-# put the board in download mode physically (unplug, then replug while holding
-# BOOT for ~2 s), and this flashes the moment the download port shows up.
-set -euo pipefail
+# Flash the moment a ROM download-mode port appears, and keep retrying across
+# flickers. Use when the software escape hatch can't run: put the board in
+# download mode physically (unplug, replug WHILE HOLDING BOOT ~2 s, then RELEASE
+# BOOT so the USB stabilizes while download mode stays latched).
+#
+# The port on this dev unit can appear and vanish within a couple of seconds, so
+# this grabs it fast (short settle) and, if esptool loses the race, waits for the
+# port to reappear and tries again — for up to 15 minutes total.
+set -uo pipefail
 cd "$(dirname "$0")"
 source ~/esp/esp-idf/export.sh >/dev/null 2>&1
-
-echo "==> waiting up to 1 h for a download-mode serial port ..."
-PORT=""
-for i in $(seq 1 3600); do
-  P=$(ls /dev/cu.usbmodem* 2>/dev/null | head -1 || true)
-  if [ -n "$P" ]; then PORT="$P"; echo "==> download port: $PORT (after ${i}s)"; break; fi
-  sleep 1
-done
-[ -z "$PORT" ] && { echo "no download-mode port appeared in time"; exit 1; }
-
-# Let the freshly-enumerated port settle — grabbing it immediately trips macOS
-# pySerial with "Could not configure port: Device not configured".
-echo "==> port up; letting it settle 3 s"
-sleep 3
-
 cd build
-# Board is already in download mode (BOOT held on power-up), so do NOT pre-reset.
-# Retry the connect a few times: macOS can still report the port busy briefly.
-ok=0
-for attempt in 1 2 3 4; do
-  echo "==> flash attempt $attempt"
-  if python -m esptool --chip esp32s3 -p "$PORT" -b 460800 --before no_reset --after hard_reset \
+
+DEADLINE=$(( $(date +%s) + 10800 ))
+echo "==> watching for a download-mode port (up to 3 h); flashing on sight ..."
+while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+  P=$(ls /dev/cu.usbmodem* 2>/dev/null | head -1 || true)
+  if [ -z "$P" ]; then sleep 0.3; continue; fi
+  echo "==> download port $P — flashing"
+  sleep 1   # brief settle so macOS can configure the port (but short enough to beat a flicker)
+  if python -m esptool --chip esp32s3 -p "$P" -b 460800 --before no_reset --after hard_reset \
        write_flash --flash_mode dio --flash_freq 80m --flash_size 16MB \
        0x0 bootloader/bootloader.bin 0x10000 corekeys_mule.bin 0x8000 partition_table/partition-table.bin; then
-    ok=1; break
+    echo "==> FLASHED OK; board hard-reset into the new firmware"
+    exit 0
   fi
-  echo "==> attempt $attempt failed; the port may still be settling — retrying in 2 s"
-  sleep 2
-  # The port name can change if the board re-enumerated between attempts.
-  P=$(ls /dev/cu.usbmodem* 2>/dev/null | head -1 || true); [ -n "$P" ] && PORT="$P"
+  echo "==> attempt failed (port likely flickered); waiting for it to reappear ..."
+  sleep 1
 done
-[ "$ok" = 1 ] && echo "==> flashed; board hard-reset into the new firmware" \
-             || { echo "==> all flash attempts failed"; exit 1; }
+echo "==> watch window elapsed with no successful flash"
+exit 1
