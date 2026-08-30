@@ -163,17 +163,17 @@ static void scr_approve(ui_canvas_t *cv, const ui_state_t *st)
     topbar(cv, "SIGN IN", "FIDO2", ui_hex(UIC_CORE_G));
 
     int cy = 132;
-    // progress ring around the mark
+    // progress ring around the mark (fills while BOOT is held, in later builds)
     ui_ring(cv, CX, cy, 52, 6, ui_hex(UIC_LINE2));
     float p = clampf(st->progress, 0, 1);
     if (p > 0) ui_arc(cv, CX, cy, 52, 6, -TAU * 0.25f, -TAU * 0.25f + TAU * p, ui_hex(UIC_OK));
     draw_rings(cv, CX, cy, 30, 10, 24, true, 1);
 
-    ui_text_center(cv, CX, 200, st->rp ? st->rp : "?", 2, ui_hex(UIC_INK));
-    if (st->coauthd)
+    ui_text_center(cv, CX, 202, st->rp && st->rp[0] ? st->rp : "sign", 2, ui_hex(UIC_INK));
+    if (st->forwarded)
+        ui_text_center(cv, CX, 230, "!! FORWARDED", 1, ui_hex(UIC_DANGER));
+    else if (st->coauthd)
         ui_text_center(cv, CX, 230, "desktop co-authorized", 1, ui_hex(UIC_OK));
-    else
-        ui_text_center(cv, CX, 230, "waiting for desktop", 1, ui_hex(UIC_MUTED));
 
     ui_hline(cv, 14, 284, W - 28, ui_hex(UIC_LINE));
     ui_text_center(cv, CX, 294, "HOLD BOOT TO SIGN", 1, ui_hex(UIC_INK));
@@ -183,14 +183,41 @@ static void scr_approve(ui_canvas_t *cv, const ui_state_t *st)
 static void scr_pair(ui_canvas_t *cv, const ui_state_t *st)
 {
     ui_clear(cv, ui_hex(UIC_BG));
-    topbar(cv, "PAIRING", "SAS", ui_hex(UIC_CORE_G));
+    topbar(cv, "PAIRING", (st->sas && st->sas[0]) ? "SAS" : NULL, ui_hex(UIC_CORE_G));
+
+    if (!st->sas || !st->sas[0]) {
+        // Waiting for the desktop: rings reaching toward each other, core unlit.
+        float br = 1.0f + 0.15f * sinf(st->t * 2.2f);
+        draw_rings(cv, CX, 128, 34, 11, (int)(26 * br), false, 1);
+        ui_text_center(cv, CX, 200, "ENROLL", 2, ui_hex(UIC_CORE_G));
+        ui_text_center(cv, CX, 232, "on the desktop run", 1, ui_hex(UIC_MUTED));
+        ui_text_center(cv, CX, 248, "corekeys-daemon pair", 1, ui_hex(UIC_SUB));
+        ui_hline(cv, 14, 284, W - 28, ui_hex(UIC_LINE));
+        ui_text_center(cv, CX, 294, "waiting for desktop", 1, ui_hex(UIC_MUTED));
+        return;
+    }
     draw_rings(cv, CX, 74, 26, 9, 20, true, 1);   // linking
     ui_text_center(cv, CX, 128, "COMPARE", 1, ui_hex(UIC_MUTED));
-    ui_text_center(cv, CX, 154, st->sas ? st->sas : "------", 3, ui_hex(UIC_INK));
+    ui_text_center(cv, CX, 154, st->sas, 3, ui_hex(UIC_INK));
     ui_text_center(cv, CX, 214, "machine . unverified", 1, ui_hex(UIC_MUTED));
     ui_text_center(cv, CX, 230, st->machine ? st->machine : "?", 1, ui_hex(UIC_CORE_G));
     ui_hline(cv, 14, 284, W - 28, ui_hex(UIC_LINE));
     ui_text_center(cv, CX, 294, "match? press BOOT", 1, ui_hex(UIC_SUB));
+}
+
+// ---- RESULT (brief post-decision) -------------------------------------------
+static void scr_result(ui_canvas_t *cv, const ui_state_t *st)
+{
+    ui_clear(cv, ui_hex(UIC_BG));
+    const char *m = st->msg ? st->msg : "";
+    // Tint by keyword: signed/paired = mint, denied/error = danger, else core.
+    uint16_t c = ui_hex(UIC_CORE_G);
+    if (strstr(m, "sign") || strstr(m, "PAIR") || strstr(m, "ok")) c = ui_hex(UIC_OK);
+    else if (strstr(m, "den") || strstr(m, "fail") || strstr(m, "err") || strstr(m, "mismatch")) c = ui_hex(UIC_DANGER);
+    bool good = (c == ui_hex(UIC_OK));
+    draw_rings(cv, CX, 130, 38, 12, 30, good, 1);
+    ui_text_center(cv, CX, 210, "core-keys", 2, ui_hex(UIC_INK));
+    ui_text_center(cv, CX, 244, m, 1, c);
 }
 
 void ui_render(ui_canvas_t *cv, const ui_state_t *st)
@@ -202,5 +229,6 @@ void ui_render(ui_canvas_t *cv, const ui_state_t *st)
     case UI_CREDS:   scr_creds(cv, st); break;
     case UI_APPROVE: scr_approve(cv, st); break;
     case UI_PAIR:    scr_pair(cv, st); break;
+    case UI_RESULT:  scr_result(cv, st); break;
     }
 }

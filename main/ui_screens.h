@@ -2,7 +2,7 @@
 #pragma once
 #include "ui_draw.h"
 
-typedef enum { UI_BOOT, UI_LOCK, UI_HOME, UI_CREDS, UI_APPROVE, UI_PAIR } ui_screen_t;
+typedef enum { UI_BOOT, UI_LOCK, UI_HOME, UI_CREDS, UI_APPROVE, UI_PAIR, UI_RESULT } ui_screen_t;
 
 #define UI_MAX_CREDS 8
 
@@ -25,11 +25,14 @@ typedef struct {
 
     // approval
     const char *rp;
-    bool coauthd;
+    bool coauthd, forwarded;
     float progress;          // 0..1 hold-to-approve
 
     // pairing
     const char *sas, *machine;
+
+    // result / transient message
+    const char *msg;
 } ui_state_t;
 
 // Render the active screen into the canvas.

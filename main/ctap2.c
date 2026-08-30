@@ -16,6 +16,7 @@
 #include "ck_credid.h"
 #include "session.h"     // ck_button_init / ck_button_pressed / co-auth
 #include "lcd.h"
+#include "ui.h"
 
 static const char *TAG = "ctap2";
 

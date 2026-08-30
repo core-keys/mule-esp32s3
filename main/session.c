@@ -14,6 +14,7 @@
 #include "session.h"
 #include "corekeys.h"
 #include "lcd.h"
+#include "ui.h"
 
 static const char *TAG = "session";
 

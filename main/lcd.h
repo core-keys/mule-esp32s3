@@ -16,7 +16,7 @@
 bool     lcd_init(void);                 // returns true if the panel came up
 uint16_t lcd_rgb(uint8_t r, uint8_t g, uint8_t b);
 void     lcd_fill(uint16_t color);
-void     lcd_text(int x, int y, const char *s, int scale, uint16_t fg, uint16_t bg);
+uint16_t *lcd_fb(void);                  // the RGB565 framebuffer (owned by ui.c)
 void     lcd_flush(void);                // push the framebuffer to the panel
 
 // Remote diagnostics (there is no serial console once TinyUSB owns the USB).
@@ -29,17 +29,5 @@ typedef struct {
 } lcd_diag_t;
 lcd_diag_t lcd_diag(void);
 
-// Screens (draw from a single task to avoid races — see main.c).
-void ui_boot_splash(void);
-void ui_note_ctap(const char *cmd);      // update the status screen after activity
-
-// The per-operation approval prompt — the WYSIWYS moment. `who` is e.g.
-// "felipe@prod-db"; `forwarded` raises the FORWARDED banner.
-void ui_approval(const char *who, bool forwarded);
-void ui_result(const char *msg);         // brief post-decision screen
-
-// Pairing (ENROLL) screens. `ui_enroll` is the "waiting for desktop" screen
-// shown when the device boots armed; `ui_pair_sas` shows the 6-digit code to
-// compare against the daemon, with the unverified machine name.
-void ui_enroll(void);
-void ui_pair_sas(uint32_t sas, const uint8_t *machine, uint16_t machine_len);
+// The screen API (ui_boot_splash / ui_note_ctap / ui_approval / ui_result /
+// ui_enroll / ui_pair_sas) now lives in ui.h — those are UI-task state setters.

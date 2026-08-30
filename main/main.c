@@ -15,6 +15,7 @@
 #include "tinyusb.h"
 #include "corekeys.h"
 #include "lcd.h"
+#include "ui.h"
 #include "ckvp.h"
 #include "session.h"
 #include "noise/protocol.h"
@@ -183,7 +184,10 @@ void app_main(void)
     ESP_LOGI(TAG, "boot: noise selftest = %d (0=ok)", g_noise_status);
     bool lcd_ok = lcd_init();
     ESP_LOGI(TAG, "boot: lcd_init()=%d", lcd_ok);
-    if (lcd_ok) ui_boot_splash();
+    // Hand the framebuffer to the UI task; it owns all drawing (boot animation +
+    // every screen). Setters elsewhere just update state.
+    ui_init(lcd_fb(), LCD_W, LCD_H);
+    if (lcd_ok) ui_task_start();
 
     // NVS-backed device identity + authorized-daemon list, and the enroll-gesture
     // check (GPIO14 held at boot -> pairing mode). Must run before the host can

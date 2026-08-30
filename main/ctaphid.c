@@ -13,6 +13,7 @@
 #include "ctaphid.h"
 #include "ctap2.h"
 #include "lcd.h"
+#include "ui.h"
 
 static const char *TAG = "ctaphid";
 
