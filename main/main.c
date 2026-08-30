@@ -148,7 +148,8 @@ static void worker_task(void *arg)
     // drawing happens on this task (plus the pre-worker splash), so there is
     // never concurrent access to the framebuffer.
     vTaskDelay(pdMS_TO_TICKS(1800));
-    ui_note_ctap("idle");
+    if (session_enroll_armed()) ui_enroll();
+    else ui_note_ctap("idle");
 
     ck_rx_item_t item;
     for (;;) {
@@ -183,6 +184,11 @@ void app_main(void)
     bool lcd_ok = lcd_init();
     ESP_LOGI(TAG, "boot: lcd_init()=%d", lcd_ok);
     if (lcd_ok) ui_boot_splash();
+
+    // NVS-backed device identity + authorized-daemon list, and the enroll-gesture
+    // check (GPIO14 held at boot -> pairing mode). Must run before the host can
+    // reach us, so the device is ready to answer (or refuse) the first message.
+    session_init();
 
     // Brief dwell so the splash is visible before USB enumerates.
     vTaskDelay(pdMS_TO_TICKS(1500));

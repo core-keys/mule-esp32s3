@@ -37,3 +37,9 @@ void ui_note_ctap(const char *cmd);      // update the status screen after activ
 // "felipe@prod-db"; `forwarded` raises the FORWARDED banner.
 void ui_approval(const char *who, bool forwarded);
 void ui_result(const char *msg);         // brief post-decision screen
+
+// Pairing (ENROLL) screens. `ui_enroll` is the "waiting for desktop" screen
+// shown when the device boots armed; `ui_pair_sas` shows the 6-digit code to
+// compare against the daemon, with the unverified machine name.
+void ui_enroll(void);
+void ui_pair_sas(uint32_t sas, const uint8_t *machine, uint16_t machine_len);

@@ -5,8 +5,11 @@
 #include "freertos/task.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
+#include "esp_random.h"
+#include "mbedtls/sha256.h"
 #include "noise/protocol.h"
 #include "ck_ed25519.h"
+#include "ck_store.h"
 #include "ckvp.h"
 #include "session.h"
 #include "corekeys.h"
@@ -14,18 +17,13 @@
 
 static const char *TAG = "session";
 
-// ---- Fixed bring-up keys (NO pairing yet; match the daemon's gen_keys) -------
-static const uint8_t CK_DEVICE_PRIV[32] = {
-    0x10, 0xa1, 0x8e, 0x4f, 0x06, 0xcb, 0x47, 0x3c, 0x06, 0x4a, 0xb4, 0x1f,
-    0x36, 0x80, 0xc7, 0x71, 0xa1, 0xf5, 0x43, 0x2a, 0xbe, 0xeb, 0xd1, 0x50,
-    0x9a, 0x08, 0x5d, 0x84, 0x9d, 0xd4, 0xeb, 0x04,
-};
-static const uint8_t CK_DAEMON_PUB[32] = {
-    0x4e, 0x6d, 0x2a, 0x36, 0x38, 0x32, 0xae, 0x81, 0x73, 0xfa, 0x7d, 0x1a,
-    0xf2, 0x54, 0xac, 0x7d, 0x22, 0x49, 0xb7, 0xc7, 0xf3, 0xa2, 0x68, 0xc0,
-    0x5c, 0xf3, 0xd6, 0x0e, 0x4f, 0x7f, 0x05, 0x31,
-};
-// Device SSH ed25519 credential seed (public is derived at boot).
+// The device's Noise X25519 static — generated once and stored in NVS on first
+// boot (ck_store), NOT a shared constant. The authorized-daemon list (pinned via
+// pairing) also lives in NVS. Only the SSH ed25519 credential remains fixed for
+// now (the daemon still knows it out of band).
+static uint8_t s_device_priv[32], s_device_pub[32];
+static bool s_keys_ready;
+
 static const uint8_t CK_SSH_SEED[32] = {
     0x63, 0x6f, 0x72, 0x65, 0x2d, 0x6b, 0x65, 0x79, 0x73, 0x2d, 0x6d, 0x75,
     0x6c, 0x65, 0x2d, 0x73, 0x73, 0x68, 0x2d, 0x73, 0x65, 0x65, 0x64, 0x2d,
@@ -33,9 +31,15 @@ static const uint8_t CK_SSH_SEED[32] = {
 };
 
 #define BUTTON_GPIO      GPIO_NUM_0    // BOOT button
-#define BUTTON_GPIO2     GPIO_NUM_14   // T-Display-S3 second button
+#define BUTTON_GPIO2     GPIO_NUM_14   // T-Display-S3 second button (enroll gesture)
 #define BUTTON_WINDOW_MS 20000
 #define REQ_ID_LEN       8
+
+// Pairing (docs §4). Domain labels + sizes must match the daemon/protocol.
+#define PAIR_NONCE_LEN   16
+#define MACHINE_NAME_MAX 32
+static const uint8_t L_COMMIT[] = "core-keys/pair/v1/commit";
+static const uint8_t L_SAS[]    = "core-keys/pair/v1/sas";
 
 enum { ST_IDLE = 0, ST_HANDSHAKING = 1, ST_TRANSPORT = 2 };
 static int s_state = ST_IDLE;
@@ -44,7 +48,19 @@ static uint16_t s_chan = 1;
 static uint8_t s_ssh_pub[32];
 static bool s_ssh_pub_ready, s_button_ready;
 
+// Enroll / pairing (D side) state.
+enum { PS_IDLE = 0, PS_GOT_INIT, PS_AWAIT_POP };
+static bool s_enroll_armed;
+static int s_pair_state;
+static uint8_t s_pair_commit[32];
+static uint8_t s_pair_machine[MACHINE_NAME_MAX];
+static uint16_t s_pair_machine_len;
+static uint8_t s_pair_d_nonce[PAIR_NONCE_LEN];
+static uint8_t s_pair_h_pub[32];
+static uint8_t s_pair_h_nonce[PAIR_NONCE_LEN];
+
 int session_state(void) { return s_state; }
+bool session_enroll_armed(void) { return s_enroll_armed; }
 
 static void emit_vendor(const uint8_t report[CKVP_REPORT]) { ck_report_send(ITF_VENDOR, report); }
 
@@ -219,33 +235,39 @@ static void send_encrypted(const uint8_t *plain, uint16_t plen)
     ckvp_encode(CK_MT_NOISE_MSG, s_chan, buf, b.size, emit_vendor);
 }
 
-static void do_handshake(const uint8_t *msg1, uint16_t len)
+// Run the Noise_KK responder handshake against `remote_pub` (a candidate daemon
+// static), using the device's NVS static. Returns 0 and leaves the session in
+// ST_TRANSPORT on success; -1 (session reset) if this key is not the peer. The
+// caller retries with the next authorized key, so a wrong key is not fatal.
+static int do_handshake(const uint8_t *msg1, uint16_t len, const uint8_t *remote_pub)
 {
     reset_session();
+    if (!s_keys_ready) return -1;
     s_state = ST_HANDSHAKING;
     if (!s_ssh_pub_ready) { ck_ed25519_pubkey(CK_SSH_SEED, s_ssh_pub); s_ssh_pub_ready = true; }
 
     NoiseHandshakeState *hs = 0;
     if (noise_handshakestate_new_by_name(&hs, "Noise_KK_25519_ChaChaPoly_SHA256",
-                                         NOISE_ROLE_RESPONDER) != NOISE_ERROR_NONE) { s_state = ST_IDLE; return; }
-    noise_dhstate_set_keypair_private(noise_handshakestate_get_local_keypair_dh(hs), CK_DEVICE_PRIV, 32);
-    noise_dhstate_set_public_key(noise_handshakestate_get_remote_public_key_dh(hs), CK_DAEMON_PUB, 32);
-    if (noise_handshakestate_start(hs) != NOISE_ERROR_NONE) { noise_handshakestate_free(hs); s_state = ST_IDLE; return; }
+                                         NOISE_ROLE_RESPONDER) != NOISE_ERROR_NONE) { s_state = ST_IDLE; return -1; }
+    noise_dhstate_set_keypair_private(noise_handshakestate_get_local_keypair_dh(hs), s_device_priv, 32);
+    noise_dhstate_set_public_key(noise_handshakestate_get_remote_public_key_dh(hs), remote_pub, 32);
+    if (noise_handshakestate_start(hs) != NOISE_ERROR_NONE) { noise_handshakestate_free(hs); s_state = ST_IDLE; return -1; }
 
     uint8_t inbuf[512], outbuf[512];
     NoiseBuffer mb;
-    if (len > sizeof(inbuf)) { noise_handshakestate_free(hs); s_state = ST_IDLE; return; }
+    if (len > sizeof(inbuf)) { noise_handshakestate_free(hs); s_state = ST_IDLE; return -1; }
     memcpy(inbuf, msg1, len);
     noise_buffer_set_input(mb, inbuf, len);
-    if (noise_handshakestate_read_message(hs, &mb, NULL) != NOISE_ERROR_NONE) { noise_handshakestate_free(hs); s_state = ST_IDLE; return; }
+    if (noise_handshakestate_read_message(hs, &mb, NULL) != NOISE_ERROR_NONE) { noise_handshakestate_free(hs); s_state = ST_IDLE; return -1; }
     noise_buffer_set_output(mb, outbuf, sizeof(outbuf));
-    if (noise_handshakestate_write_message(hs, &mb, NULL) != NOISE_ERROR_NONE) { noise_handshakestate_free(hs); s_state = ST_IDLE; return; }
+    if (noise_handshakestate_write_message(hs, &mb, NULL) != NOISE_ERROR_NONE) { noise_handshakestate_free(hs); s_state = ST_IDLE; return -1; }
     ckvp_encode(CK_MT_NOISE_HS, s_chan, outbuf, mb.size, emit_vendor);
-    if (noise_handshakestate_split(hs, &s_send, &s_recv) != NOISE_ERROR_NONE) { noise_handshakestate_free(hs); s_state = ST_IDLE; return; }
+    if (noise_handshakestate_split(hs, &s_send, &s_recv) != NOISE_ERROR_NONE) { noise_handshakestate_free(hs); s_state = ST_IDLE; return -1; }
     noise_handshakestate_free(hs);
     s_state = ST_TRANSPORT;
     ESP_LOGI(TAG, "Noise session up");
     ui_note_ctap("session up");
+    return 0;
 }
 
 // Handle a decrypted SIGN_REQ: parse, show the approval, wait for the button,
@@ -365,9 +387,156 @@ static void do_transport(const uint8_t *data, uint16_t len)
     // Unknown tags: drop (no plaintext side effects, §5).
 }
 
+// ---- Pairing (D side, docs §4) ----------------------------------------------
+// commit = SHA-256(L_COMMIT || h_pub || h_nonce || machine_name).
+static void compute_commit(const uint8_t h_pub[32], const uint8_t h_nonce[PAIR_NONCE_LEN],
+                           const uint8_t *machine, uint16_t machine_len, uint8_t out[32])
+{
+    mbedtls_sha256_context c;
+    mbedtls_sha256_init(&c);
+    mbedtls_sha256_starts(&c, 0);
+    mbedtls_sha256_update(&c, L_COMMIT, sizeof(L_COMMIT) - 1);
+    mbedtls_sha256_update(&c, h_pub, 32);
+    mbedtls_sha256_update(&c, h_nonce, PAIR_NONCE_LEN);
+    mbedtls_sha256_update(&c, machine, machine_len);
+    mbedtls_sha256_finish(&c, out);
+    mbedtls_sha256_free(&c);
+}
+
+// SAS = SHA-256(L_SAS || d_pub || h_pub || d_nonce || h_nonce || machine_name),
+// first 8 bytes big-endian mod 10^6.
+static uint32_t compute_sas(const uint8_t d_pub[32], const uint8_t h_pub[32],
+                            const uint8_t d_nonce[PAIR_NONCE_LEN], const uint8_t h_nonce[PAIR_NONCE_LEN],
+                            const uint8_t *machine, uint16_t machine_len)
+{
+    uint8_t digest[32];
+    mbedtls_sha256_context c;
+    mbedtls_sha256_init(&c);
+    mbedtls_sha256_starts(&c, 0);
+    mbedtls_sha256_update(&c, L_SAS, sizeof(L_SAS) - 1);
+    mbedtls_sha256_update(&c, d_pub, 32);
+    mbedtls_sha256_update(&c, h_pub, 32);
+    mbedtls_sha256_update(&c, d_nonce, PAIR_NONCE_LEN);
+    mbedtls_sha256_update(&c, h_nonce, PAIR_NONCE_LEN);
+    mbedtls_sha256_update(&c, machine, machine_len);
+    mbedtls_sha256_finish(&c, digest);
+    mbedtls_sha256_free(&c);
+    uint64_t v = 0;
+    for (int i = 0; i < 8; i++) v = (v << 8) | digest[i];
+    return (uint32_t)(v % 1000000ULL);
+}
+
+// PAIR_INIT { commit(32) || name_len(1) || machine_name } — reveal D's static
+// and a fresh nonce in PAIR_RESP. Ignored unless enroll is physically armed.
+static void on_pair_init(const uint8_t *data, uint16_t len)
+{
+    if (!s_enroll_armed) return;                 // reveal nothing until armed
+    if (len < 33) return;
+    uint8_t name_len = data[32];
+    if (name_len > MACHINE_NAME_MAX || len != (uint16_t)(33 + name_len)) return;
+
+    memcpy(s_pair_commit, data, 32);
+    memcpy(s_pair_machine, data + 33, name_len);
+    s_pair_machine_len = name_len;
+    esp_fill_random(s_pair_d_nonce, PAIR_NONCE_LEN);
+
+    uint8_t resp[32 + PAIR_NONCE_LEN];
+    memcpy(resp, s_device_pub, 32);
+    memcpy(resp + 32, s_pair_d_nonce, PAIR_NONCE_LEN);
+    ckvp_encode(CK_MT_PAIR_RESP, s_chan, resp, sizeof(resp), emit_vendor);
+    s_pair_state = PS_GOT_INIT;
+    ESP_LOGI(TAG, "pairing: sent PAIR_RESP");
+}
+
+// PAIR_OPEN { h_pub(32) || h_nonce(16) } — check the commitment, show the SAS,
+// wait for the button, and answer PAIR_CONFIRM. On confirm, expect the PoP.
+static void on_pair_open(const uint8_t *data, uint16_t len)
+{
+    if (!s_enroll_armed || s_pair_state != PS_GOT_INIT) return;
+    if (len != 32 + PAIR_NONCE_LEN) return;
+    memcpy(s_pair_h_pub, data, 32);
+    memcpy(s_pair_h_nonce, data + 32, PAIR_NONCE_LEN);
+
+    uint8_t expect[32];
+    compute_commit(s_pair_h_pub, s_pair_h_nonce, s_pair_machine, s_pair_machine_len, expect);
+    uint8_t conf;
+    if (memcmp(expect, s_pair_commit, 32) != 0) {   // interposer / corruption
+        ESP_LOGW(TAG, "pairing: commit mismatch");
+        ui_result("pair mismatch");
+        s_pair_state = PS_IDLE;
+        conf = 1;
+        ckvp_encode(CK_MT_PAIR_CONFIRM, s_chan, &conf, 1, emit_vendor);
+        return;
+    }
+
+    uint32_t sas = compute_sas(s_device_pub, s_pair_h_pub, s_pair_d_nonce, s_pair_h_nonce,
+                               s_pair_machine, s_pair_machine_len);
+    ui_pair_sas(sas, s_pair_machine, s_pair_machine_len);
+    bool ok = button_wait(BUTTON_WINDOW_MS);
+    conf = ok ? 0 : 1;
+    ckvp_encode(CK_MT_PAIR_CONFIRM, s_chan, &conf, 1, emit_vendor);
+    if (ok) {
+        s_pair_state = PS_AWAIT_POP;
+        ui_result("confirmed");
+    } else {
+        s_pair_state = PS_IDLE;
+        ui_result("pair denied");
+    }
+}
+
 void session_on_message(uint8_t msg_type, const uint8_t *data, uint16_t len, uint16_t chan)
 {
     s_chan = chan;
-    if (msg_type == CK_MT_NOISE_HS) do_handshake(data, len);
-    else if (msg_type == CK_MT_NOISE_MSG) do_transport(data, len);
+    switch (msg_type) {
+    case CK_MT_PAIR_INIT:
+        on_pair_init(data, len);
+        break;
+    case CK_MT_PAIR_OPEN:
+        on_pair_open(data, len);
+        break;
+    case CK_MT_NOISE_HS:
+        if (s_enroll_armed && s_pair_state == PS_AWAIT_POP) {
+            // Proof-of-possession: pin the daemon ONLY if the handshake completes.
+            if (do_handshake(data, len, s_pair_h_pub) == 0) {
+                ck_store_auth_add(s_pair_h_pub);
+                ESP_LOGI(TAG, "pairing complete — daemon pinned");
+                ui_result("PAIRED");
+            } else {
+                ui_result("pair PoP fail");
+            }
+            s_pair_state = PS_IDLE;
+        } else {
+            // Normal reconnect: try each pinned daemon until one is the peer.
+            int n = ck_store_auth_count();
+            for (int i = 0; i < n; i++) {
+                uint8_t dpub[32];
+                if (ck_store_auth_get(i, dpub) == 0 && do_handshake(data, len, dpub) == 0) break;
+            }
+        }
+        break;
+    case CK_MT_NOISE_MSG:
+        do_transport(data, len);
+        break;
+    default:
+        break;
+    }
+}
+
+// ---- Boot-time init ----------------------------------------------------------
+// Load (or first-boot generate) the device identity, and arm enroll if the
+// enroll button (GPIO14) is held at boot. Call once from app_main.
+void session_init(void)
+{
+    ck_store_init();
+    if (ck_store_device_static(s_device_priv, s_device_pub) == 0) s_keys_ready = true;
+    ck_ed25519_pubkey(CK_SSH_SEED, s_ssh_pub);
+    s_ssh_pub_ready = true;
+
+    button_init();
+    if (gpio_get_level(BUTTON_GPIO2) == 0) {   // held low = pressed
+        s_enroll_armed = true;
+        ESP_LOGI(TAG, "ENROLL armed (GPIO14 held at boot)");
+    }
+    ESP_LOGI(TAG, "device identity ready; %d daemon(s) pinned; enroll=%d",
+             ck_store_auth_count(), s_enroll_armed);
 }

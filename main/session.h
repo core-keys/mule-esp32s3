@@ -7,6 +7,13 @@
 // Feed a complete CKVP message (from the vendor channel) into the session.
 void session_on_message(uint8_t msg_type, const uint8_t *data, uint16_t len, uint16_t chan);
 
+// Load/generate the device identity from NVS and arm enroll if GPIO14 is held
+// at boot. Call once from app_main before the worker task starts.
+void session_init(void);
+
+// Whether the device booted into pairing (ENROLL) mode.
+bool session_enroll_armed(void);
+
 // Session state for the display: 0 = idle, 1 = handshaking, 2 = transport up.
 int session_state(void);
 

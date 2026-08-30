@@ -217,3 +217,34 @@ void ui_result(const char *msg)
     lcd_text(centered_x(msg, 1), 120, msg, 1, COL_FG, COL_BG);
     lcd_flush();
 }
+
+void ui_enroll(void)
+{
+    lcd_fill(COL_BG);
+    lcd_text(centered_x("PAIRING", 2), 28, "PAIRING", 2, COL_TEAL, COL_BG);
+    lcd_text(8, 84,  "enroll mode armed", 1, COL_MUTED, COL_BG);
+    lcd_text(8, 128, "on the desktop run", 1, COL_MUTED, COL_BG);
+    lcd_text(8, 152, "corekeys-daemon", 1, COL_FG, COL_BG);
+    lcd_text(8, 172, "  pair", 1, COL_FG, COL_BG);
+    lcd_text(8, 288, "waiting for desktop", 1, COL_MUTED, COL_BG);
+    lcd_flush();
+}
+
+void ui_pair_sas(uint32_t sas, const uint8_t *machine, uint16_t machine_len)
+{
+    char code[8];
+    snprintf(code, sizeof(code), "%06lu", (unsigned long)(sas % 1000000UL));
+    char name[33];
+    uint16_t n = machine_len < 32 ? machine_len : 32;
+    memcpy(name, machine, n);
+    name[n] = 0;
+
+    lcd_fill(COL_BG);
+    lcd_text(centered_x("COMPARE", 2), 24, "COMPARE", 2, COL_COPPER, COL_BG);
+    lcd_text(centered_x(code, 3), 78, code, 3, COL_FG, COL_BG);
+    lcd_text(8, 150, "machine (unverified):", 1, COL_MUTED, COL_BG);
+    lcd_text(8, 172, name, 1, COL_TEAL, COL_BG);
+    lcd_text(8, 280, "match? press BOOT", 1, COL_FG, COL_BG);
+    lcd_text(8, 300, "differ? unplug", 1, COL_MUTED, COL_BG);
+    lcd_flush();
+}
