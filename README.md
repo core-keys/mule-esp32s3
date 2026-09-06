@@ -1,3 +1,7 @@
+<p align="center">
+  <img src=".github/banner.png" alt="core-keys — split-key authenticator · firmware" width="800">
+</p>
+
 # mule-esp32s3
 
 Protocol-mule firmware for **core-keys**, a split-key hardware authenticator for
