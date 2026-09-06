@@ -1,0 +1,14 @@
+# ESP-IDF build output & fetched components
+build/
+managed_components/
+sdkconfig
+sdkconfig.old
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+hidvenv/
+
+# OS
+.DS_Store

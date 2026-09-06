@@ -19,7 +19,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 FONT_DIR = os.path.join(ROOT, "tools", "fonts")
-OUT_DIR = os.path.join(ROOT, "firmware", "mule-esp32s3", "main")
+OUT_DIR = os.path.join(ROOT, "main")
 
 FIRST, LAST = 0x20, 0x7E
 
