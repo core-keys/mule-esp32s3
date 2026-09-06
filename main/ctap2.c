@@ -14,6 +14,7 @@
 #include "ctaphid.h"
 #include "ck_p256.h"
 #include "ck_credid.h"
+#include "ck_store.h"
 #include "session.h"     // ck_button_init / ck_button_pressed / co-auth
 #include "lcd.h"
 #include "ui.h"
@@ -140,6 +141,7 @@ static bool button_gate(uint32_t cid, uint32_t timeout_ms)
     ck_button_init();
     uint32_t elapsed = 0, since_ka = KEEPALIVE_INTERVAL_MS;   // fire one immediately
     while (elapsed < timeout_ms) {
+        if (ui_touch_approve_taken()) return true;           // on-screen APPROVE tap
         if (ck_button_pressed()) {
             vTaskDelay(pdMS_TO_TICKS(30));                    // debounce
             if (ck_button_pressed()) return true;
@@ -210,6 +212,7 @@ static int button_gate_pumped(uint32_t cid, uint32_t timeout_ms)
     ck_button_init();
     uint32_t elapsed = 0, since_ka = KEEPALIVE_INTERVAL_MS;
     while (elapsed < timeout_ms) {
+        if (ui_touch_approve_taken()) return 1;          // on-screen APPROVE tap
         if (ck_button_pressed()) {
             vTaskDelay(pdMS_TO_TICKS(30));
             if (ck_button_pressed()) return 1;
@@ -231,6 +234,7 @@ static int button_gate_pumped(uint32_t cid, uint32_t timeout_ms)
 // ================= authenticatorMakeCredential (0x01) =========================
 void ctap2_make_credential(uint32_t cid, const uint8_t *req, uint16_t len)
 {
+    if (!ui_is_unlocked()) { ctap_status(cid, CTAP2_ERR_OPERATION_DENIED); return; }
     ui_note_ctap("makeCred");
     cbr_t c = { req, len, 0 };
     uint32_t nkeys;
@@ -238,6 +242,7 @@ void ctap2_make_credential(uint32_t cid, const uint8_t *req, uint16_t len)
 
     const uint8_t *client_hash = NULL; uint16_t client_hash_len = 0;
     const uint8_t *rp_id = NULL; uint16_t rp_len = 0;
+    const uint8_t *user_name = NULL; uint16_t user_name_len = 0;
     bool have_user = false, alg_ok = false;
     bool opt_rk = false, opt_uv = false;
     const uint8_t *exclude = NULL; uint16_t exclude_pos = 0, exclude_at = 0;
@@ -262,13 +267,15 @@ void ctap2_make_credential(uint32_t cid, const uint8_t *req, uint16_t len)
             }
             break;
         }
-        case 0x03: {  // user: only its presence matters to us
+        case 0x03: {  // user: capture "name" for the credential journal
             uint32_t un;
             if (cbr_map(&c, &un)) { ctap_status(cid, CTAP2_ERR_INVALID_CBOR); return; }
             for (uint32_t j = 0; j < un; j++) {
                 const uint8_t *k; uint16_t kl;
-                if (cbr_str(&c, 3, &k, &kl) || cbr_skip(&c))
-                    { ctap_status(cid, CTAP2_ERR_INVALID_CBOR); return; }
+                if (cbr_str(&c, 3, &k, &kl)) { ctap_status(cid, CTAP2_ERR_INVALID_CBOR); return; }
+                if (kl == 4 && memcmp(k, "name", 4) == 0) {
+                    if (cbr_str(&c, 3, &user_name, &user_name_len)) { ctap_status(cid, CTAP2_ERR_INVALID_CBOR); return; }
+                } else if (cbr_skip(&c)) { ctap_status(cid, CTAP2_ERR_INVALID_CBOR); return; }
             }
             have_user = true;
             break;
@@ -413,6 +420,16 @@ void ctap2_make_credential(uint32_t cid, const uint8_t *req, uint16_t len)
         cw_tstr(&w, "sig"); cw_bstr(&w, der, (uint16_t)der_len);
     if (w.ovf) { ctap_status(cid, CTAP2_ERR_OPERATION_DENIED); return; }
 
+    // Journal the registration for the on-device Credentials list (display only;
+    // the key itself stays stateless inside the credentialId).
+    char jrp[40], juser[40];
+    uint16_t rn = rp_len < sizeof(jrp) - 1 ? rp_len : sizeof(jrp) - 1;
+    memcpy(jrp, rp_id, rn); jrp[rn] = 0;
+    uint16_t un = user_name_len < sizeof(juser) - 1 ? user_name_len : sizeof(juser) - 1;
+    if (user_name && un) memcpy(juser, user_name, un);
+    juser[user_name ? un : 0] = 0;
+    ck_store_cred_add(jrp, juser, cred_id, CK_CREDID_LEN);
+
     ui_result("registered");
     ctaphid_send(cid, CTAPHID_CBOR, resp, w.p);
     ESP_LOGI(TAG, "makeCredential OK (%u byte resp)", w.p);
@@ -421,6 +438,7 @@ void ctap2_make_credential(uint32_t cid, const uint8_t *req, uint16_t len)
 // ================= authenticatorGetAssertion (0x02) ===========================
 void ctap2_get_assertion(uint32_t cid, const uint8_t *req, uint16_t len)
 {
+    if (!ui_is_unlocked()) { ctap_status(cid, CTAP2_ERR_OPERATION_DENIED); return; }
     ui_note_ctap("getAssert");
     cbr_t c = { req, len, 0 };
     uint32_t nkeys;

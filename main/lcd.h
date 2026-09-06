@@ -18,6 +18,7 @@ uint16_t lcd_rgb(uint8_t r, uint8_t g, uint8_t b);
 void     lcd_fill(uint16_t color);
 uint16_t *lcd_fb(void);                  // the RGB565 framebuffer (owned by ui.c)
 void     lcd_flush(void);                // push the framebuffer to the panel
+void     lcd_backlight(bool on);         // screen power (backlight + panel) for sleep
 
 // Remote diagnostics (there is no serial console once TinyUSB owns the USB).
 typedef struct {

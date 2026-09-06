@@ -11,11 +11,14 @@
 #include "freertos/queue.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "driver/gpio.h"
+#include "driver/rtc_io.h"
 #include "soc/rtc_cntl_reg.h"
 #include "tinyusb.h"
 #include "corekeys.h"
 #include "lcd.h"
 #include "ui.h"
+#include "ck_batt.h"
 #include "ckvp.h"
 #include "session.h"
 #include "noise/protocol.h"
@@ -161,9 +164,22 @@ static void worker_task(void *arg)
     }
 }
 
+// Active USB host => running on / charging from external power. The S3 internal
+// PHY forces the session-valid bits high, so tud_mounted() alone latches true
+// forever after the first enumeration — but the DWC2 core still raises suspend
+// ~3ms after the bus goes idle, so mounted && !suspended tracks a live host.
+// A data-less wall charger never enumerates and reads false.
+bool ck_usb_active(void) { return tud_mounted() && !tud_suspended(); }
+
 void app_main(void)
 {
     ESP_LOGI(TAG, "core-keys M1 mule starting");
+
+    // Undo any deep-sleep pin holds / ext0 RTC config from a prior POWER OFF, so
+    // PWR_EN and the BOOT pin can be driven / reconfigured normally this boot.
+    gpio_hold_dis(GPIO_NUM_15);
+    gpio_deep_sleep_hold_dis();
+    rtc_gpio_deinit(GPIO_NUM_0);
 
     s_rx_queue = xQueueCreate(16, sizeof(ck_rx_item_t));
     if (!s_rx_queue) { ESP_LOGE(TAG, "queue alloc failed"); return; }
@@ -184,6 +200,7 @@ void app_main(void)
     ESP_LOGI(TAG, "boot: noise selftest = %d (0=ok)", g_noise_status);
     bool lcd_ok = lcd_init();
     ESP_LOGI(TAG, "boot: lcd_init()=%d", lcd_ok);
+    ck_batt_init();                          // battery ADC (GPIO4), feeds the status bar
     // Hand the framebuffer to the UI task; it owns all drawing (boot animation +
     // every screen). Setters elsewhere just update state.
     ui_init(lcd_fb(), LCD_W, LCD_H);

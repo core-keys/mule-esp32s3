@@ -31,6 +31,7 @@ bool ck_button_pressed(void);
 #define CK_RT_SIGN_RESP   0x02   // device -> daemon (SSH)
 #define CK_RT_COAUTH_REQ  0x03   // device -> daemon (FIDO2)
 #define CK_RT_COAUTH_RESP 0x04   // daemon -> device (FIDO2)
+#define CK_RT_ICON_PUSH   0x05   // daemon -> device (site favicon)
 
 // Op values inside a co-auth request (match records::Op).
 #define CK_OP_FIDO2_ASSERT   1

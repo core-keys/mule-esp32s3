@@ -198,6 +198,7 @@ static bool button_wait(uint32_t timeout_ms)
 {
     button_init();
     for (uint32_t t = 0; t < timeout_ms; t += 20) {
+        if (ui_touch_approve_taken()) return true;       // on-screen APPROVE/MATCH tap
         if (button_pressed()) {                          // pressed (active low)
             vTaskDelay(pdMS_TO_TICKS(30));               // debounce
             if (button_pressed()) return true;
@@ -280,6 +281,8 @@ static uint16_t handle_signreq(const uint8_t *plain, uint16_t plen, uint8_t *res
         return 0;   // cannot even trust req_id — drop
     if (r.op != 0)  // 0 = ssh-userauth
         return signresp_err(resp, r.req_id, r.req_id_len, "unsupported op");
+    if (!ui_is_unlocked())
+        return signresp_err(resp, r.req_id, r.req_id_len, "device locked");
 
     const uint8_t *user; uint32_t ulen;
     if (ssh_extract(r.tbs, r.tbs_len, &user, &ulen) != 0) {
@@ -362,6 +365,24 @@ static void coauth_on_resp(const uint8_t *cbor, uint16_t len)
     else if (bv == 0xF4) s_ca_verdict = CK_COAUTH_DENY;
 }
 
+// ---- Site favicon push (daemon -> device, fire-and-forget) -------------------
+// Raw binary body: rp_len(u8) || rp[rp_len] || w(u8) || h(u8) || pixels[w*h*2].
+// Pixels are RGB565, little-endian u16 per pixel, row-major — stored verbatim.
+// Untrusted input: validate strictly and drop silently on any mismatch.
+static void icon_on_push(const uint8_t *body, uint16_t body_len)
+{
+    if (body_len < 3) return;
+    uint8_t rp_len = body[0];
+    if (body_len < (uint16_t)(1 + rp_len + 2)) return;
+    uint8_t w = body[1 + rp_len];
+    uint8_t h = body[2 + rp_len];
+    if (!(w >= 1 && w <= 32 && h >= 1 && h <= 32)) return;
+    const uint8_t *pixels = body + 3 + rp_len;
+    uint16_t pix_len = (uint16_t)w * (uint16_t)h * 2u;
+    if ((uint16_t)(3 + rp_len + pix_len) != body_len) return;
+    ck_store_icon_set((const char *)(body + 1), rp_len, w, h, pixels);
+}
+
 static void do_transport(const uint8_t *data, uint16_t len)
 {
     if (s_state != ST_TRANSPORT || !s_recv || !s_send) return;
@@ -384,6 +405,8 @@ static void do_transport(const uint8_t *data, uint16_t len)
         if (rlen) send_encrypted(out, (uint16_t)(rlen + 1));
     } else if (rt == CK_RT_COAUTH_RESP) {
         coauth_on_resp(body, body_len);
+    } else if (rt == CK_RT_ICON_PUSH) {
+        icon_on_push(body, body_len);
     }
     // Unknown tags: drop (no plaintext side effects, §5).
 }
@@ -532,6 +555,7 @@ void session_init(void)
     if (ck_store_device_static(s_device_priv, s_device_pub) == 0) s_keys_ready = true;
     ck_ed25519_pubkey(CK_SSH_SEED, s_ssh_pub);
     s_ssh_pub_ready = true;
+    ui_lock_boot();                  // boot locked iff a PIN is set
 
     button_init();
     if (gpio_get_level(BUTTON_GPIO2) == 0) {   // held low = pressed

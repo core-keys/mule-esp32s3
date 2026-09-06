@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include "driver/gpio.h"
 #include "esp_heap_caps.h"
 #include "esp_lcd_io_i80.h"
@@ -28,6 +29,16 @@ static esp_lcd_panel_handle_t s_panel;
 static uint16_t *s_fb;
 static bool      s_ok;
 static bool      s_fb_internal;
+static SemaphoreHandle_t s_flush_done;   // DMA color transfer finished
+
+static bool flush_done_cb(esp_lcd_panel_io_handle_t io,
+                          esp_lcd_panel_io_event_data_t *edata, void *ctx)
+{
+    (void)io; (void)edata; (void)ctx;
+    BaseType_t hp = pdFALSE;
+    xSemaphoreGiveFromISR(s_flush_done, &hp);
+    return hp == pdTRUE;
+}
 
 // ST7789 takes big-endian RGB565; we set swap_color_bytes so we can store native.
 uint16_t lcd_rgb(uint8_t r, uint8_t g, uint8_t b)
@@ -67,8 +78,11 @@ bool lcd_init(void)
         .dc_levels = { .dc_idle_level = 0, .dc_cmd_level = 0, .dc_dummy_level = 0, .dc_data_level = 1 },
         .lcd_cmd_bits = 8,
         .lcd_param_bits = 8,
+        .on_color_trans_done = flush_done_cb,
         .flags = { .swap_color_bytes = 1 },
     };
+    s_flush_done = xSemaphoreCreateBinary();
+    if (!s_flush_done) return false;
     if (esp_lcd_new_panel_io_i80(bus, &pio_cfg, &pio) != ESP_OK) return false;
 
     esp_lcd_panel_dev_config_t panel_cfg = {
@@ -109,7 +123,18 @@ uint16_t *lcd_fb(void) { return s_fb; }
 
 void lcd_flush(void)
 {
-    if (s_ok) esp_lcd_panel_draw_bitmap(s_panel, 0, 0, LCD_W, LCD_H, s_fb);
+    if (!s_ok) return;
+    esp_lcd_panel_draw_bitmap(s_panel, 0, 0, LCD_W, LCD_H, s_fb);
+    // draw_bitmap only queues the DMA, which reads straight out of s_fb; wait
+    // for it to finish so the caller's next frame can't tear the scan-out.
+    xSemaphoreTake(s_flush_done, pdMS_TO_TICKS(50));
+}
+
+// Screen power: backlight + panel on/off, for the quick-menu "sleep" action.
+void lcd_backlight(bool on)
+{
+    gpio_set_level(PIN_BL, on ? 1 : 0);
+    if (s_ok) esp_lcd_panel_disp_on_off(s_panel, on);
 }
 
 lcd_diag_t lcd_diag(void)
